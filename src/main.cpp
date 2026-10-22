@@ -83,6 +83,11 @@ void setup() {
     web.begin();
 
     NimBLEDevice::init("JKBMS-Client");
+    if (!NimBLEDevice::setMTU(517)) {
+        APP_LOGLN("[BLE] Failed to set preferred ATT MTU to 517");
+    } else {
+        APP_LOGLN("[BLE] Preferred ATT MTU set to 517");
+    }
     if (!NimBLEDevice::setPower(9, NimBLETxPowerType::All)) {
         APP_LOGLN("[BLE] Failed to set TX power to 9 dBm");
     } else {

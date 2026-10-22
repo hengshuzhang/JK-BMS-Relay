@@ -6,7 +6,7 @@
 
 - 一个 NimBLE Central 按用户配置的 MAC 连接真实 BMS；
 - 真实 BMS 侧优先发现 `FFE0/FFE1`，并保留 `E07F/FFE1` 服务回退；
-- ESP32 不识别 JK、ANT 或其他 BMS 品牌，不解析、不修改、不重组任何 BMS 数据；
+- ESP32 不识别 BMS 品牌，不解析、不修改、不重组任何 BMS 数据；
 - ESP32 不主动生成 BMS 查询帧；客户端通过虚拟 `FFE1` 的 Write/Write Without Response 自己发送查询命令；
 - ESP32 不在真实 BMS 连接成功时主动订阅 Notify/Indicate；只有虚拟客户端开启 CCCD 后，才由客户端订阅事件驱动真实 BMS 的上游订阅；最后一个虚拟客户端取消订阅或断开后，ESP32 会移除上游订阅；
 - 真实 BMS 的 Notify/Indicate payload 按接收分片原样转发给所有已订阅的虚拟客户端；

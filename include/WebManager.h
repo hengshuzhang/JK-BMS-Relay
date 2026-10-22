@@ -22,6 +22,7 @@ private:
     void connect();
     void disconnect();
     void updateSignals();
+    void exportFrames();
     bool startSoftAp();
     void updatePowerSaving();
     bool wifiSleeping_ = false;

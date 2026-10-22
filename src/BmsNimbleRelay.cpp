@@ -12,6 +12,61 @@
 
 JkBmsNimbleRelay* JkBmsNimbleRelay::instance_ = nullptr;
 
+namespace {
+inline bool notifyMtuReady(uint16_t mtu) {
+    return mtu == AppConfig::kNotifyMtuPrimary || mtu == AppConfig::kNotifyMtuSecondary;
+}
+
+bool isAtSequence(const std::vector<uint8_t>& data, size_t offset) {
+    return offset + 4 <= data.size() && data[offset] == 0x41 &&
+           data[offset + 1] == 0x54 && data[offset + 2] == 0x0D &&
+           data[offset + 3] == 0x0A;
+}
+bool containsJkHeader(const std::vector<uint8_t>& data, uint8_t& previousPrefix) {
+    const uint8_t header[] = {0x55, 0xAA, 0xEB, 0x90};
+    const uint8_t prefixBefore = previousPrefix;
+    previousPrefix = 0;
+    if (prefixBefore > 0) {
+        const size_t required = 4 - prefixBefore;
+        const size_t available = std::min(required, data.size());
+        bool matches = true;
+        for (size_t i = 0; i < available; ++i) {
+            if (data[i] != header[prefixBefore + i]) { matches = false; break; }
+        }
+        if (matches) {
+            if (available == required) return true;
+            previousPrefix = static_cast<uint8_t>(prefixBefore + available);
+            return false;
+        }
+    }
+    for (size_t i = 0; i + 4 <= data.size(); ++i) {
+        if (data[i] == header[0] && data[i + 1] == header[1] &&
+            data[i + 2] == header[2] && data[i + 3] == header[3]) return true;
+    }
+    for (uint8_t length = 3; length > 0; --length) {
+        if (data.size() < length) continue;
+        bool matches = true;
+        for (uint8_t i = 0; i < length; ++i) {
+            if (data[data.size() - length + i] != header[i]) { matches = false; break; }
+        }
+        if (matches) { previousPrefix = length; break; }
+    }
+    return false;
+}
+void removeAtSequences(std::vector<uint8_t>& data) {
+    size_t read = 0;
+    size_t write = 0;
+    while (read < data.size()) {
+        if (isAtSequence(data, read)) {
+            read += 4;
+            continue;
+        }
+        data[write++] = data[read++];
+    }
+    data.resize(write);
+}
+}
+
 class RelayAdvertisingCallbacks final : public NimBLEExtAdvertisingCallbacks {
     void onStopped(NimBLEExtAdvertising*, int reason, uint8_t instId) override {
         auto* relay = JkBmsNimbleRelay::instance_;
@@ -58,6 +113,7 @@ class RelayServerCallbacks final : public NimBLEServerCallbacks {
                 return;
             }
             relay->phoneHandles_.push_back(handle);
+            relay->phoneMtus_.push_back(info.getMTU());
             relay->phoneAdvertisingInstances_.push_back(advertisingInstance);
             if (advertisingInstance < relay->signalCount_) {
                 // NimBLE normally stopped this connectable instance before
@@ -74,6 +130,20 @@ class RelayServerCallbacks final : public NimBLEServerCallbacks {
                       static_cast<unsigned>(advertisingInstance));
     }
 
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo& info) override {
+        auto* relay = JkBmsNimbleRelay::instance_;
+        if (!relay) return;
+        const auto handleIt = std::find(relay->phoneHandles_.begin(), relay->phoneHandles_.end(), info.getConnHandle());
+        if (handleIt == relay->phoneHandles_.end()) return;
+        const size_t index = static_cast<size_t>(handleIt - relay->phoneHandles_.begin());
+        if (index < relay->phoneMtus_.size()) {
+            relay->phoneMtus_[index] = mtu;
+            APP_LOGF("[Relay] Phone MTU changed, handle=%u mtu=%u ready=%s\\n",
+                     info.getConnHandle(), mtu,
+                     relay->isNotifyMtuReady(info.getConnHandle()) ? "yes" : "no");
+        }
+    }
+
     void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int reason) override {
         auto* relay = JkBmsNimbleRelay::instance_;
         if (!relay) return;
@@ -84,6 +154,9 @@ class RelayServerCallbacks final : public NimBLEServerCallbacks {
             if (index < relay->phoneAdvertisingInstances_.size()) {
                 relay->phoneAdvertisingInstances_.erase(
                     relay->phoneAdvertisingInstances_.begin() + index);
+            }
+            if (index < relay->phoneMtus_.size()) {
+                relay->phoneMtus_.erase(relay->phoneMtus_.begin() + index);
             }
             relay->phoneHandles_.erase(handleIt);
         }
@@ -99,6 +172,10 @@ class RelayServerCallbacks final : public NimBLEServerCallbacks {
                     relay->subscriberNotifyFailureCounts_.begin() + subscriberIndex);
             }
         }
+        relay->pendingInitialNotifyHandles_.erase(
+            std::remove(relay->pendingInitialNotifyHandles_.begin(),
+                        relay->pendingInitialNotifyHandles_.end(), handle),
+            relay->pendingInitialNotifyHandles_.end());
         if (hadSubscribers && relay->subscribedHandles_.empty() && relay->subscribeCallback_) {
             relay->subscribeCallback_(false);
         }
@@ -137,14 +214,16 @@ class RelayCharacteristicCallbacks final : public NimBLECharacteristicCallbacks 
         // BMS request, wait for the response to be cached by notifyBmsData(),
         // then read FFE1. The cache is shared by all phone connections and is
         // independent of which client most recently wrote or subscribed.
-        if (!relay->latestData_.empty()) {
-            characteristic->setValue(relay->latestData_.data(), relay->latestData_.size());
-            APP_LOGF("[Relay] Phone read: latest BMS frame, handle=%u len=%u\n",
-                          info.getConnHandle(), static_cast<unsigned>(relay->latestData_.size()));
-        } else {
-            APP_LOGF("[Relay] Phone read: no BMS frame available, handle=%u\n",
+        if (relay->latestData_.empty()) {
+            const uint8_t empty = 0;
+            characteristic->setValue(&empty, 0);
+            APP_LOGF("[Relay] Phone read: no BMS frame available, handle=%u\\n",
                           info.getConnHandle());
+            return;
         }
+        characteristic->setValue(relay->latestData_.data(), relay->latestData_.size());
+        APP_LOGF("[Relay] Phone read: filtered BMS frame, handle=%u len=%u\\n",
+                      info.getConnHandle(), static_cast<unsigned>(relay->latestData_.size()));
     }
 
     void onSubscribe(NimBLECharacteristic* characteristic, NimBLEConnInfo& info, uint16_t value) override {
@@ -159,23 +238,16 @@ class RelayCharacteristicCallbacks final : public NimBLECharacteristicCallbacks 
             if (!wasSubscribed) {
                 relay->subscribedHandles_.push_back(handle);
                 relay->subscriberNotifyFailureCounts_.push_back(0);
-            }
-            if (relay->subscribeCallback_) {
-                // Repeat enable events also provide a retry path if the
-                // upstream subscription failed on an earlier attempt.
-                relay->subscribeCallback_(true);
+                if (relay->subscribeCallback_) relay->subscribeCallback_(true);
+                if (std::find(relay->pendingInitialNotifyHandles_.begin(),
+                              relay->pendingInitialNotifyHandles_.end(), handle) ==
+                    relay->pendingInitialNotifyHandles_.end()) {
+                    relay->pendingInitialNotifyHandles_.push_back(handle);
+                }
+                relay->initialNotifyNotBeforeAt_ = millis() + AppConfig::kDownstreamInitialNotifyDelayMs;
             }
             APP_LOGF("[Relay] FFE1 CCCD enabled, handle=%u subscribers=%u\n",
                           handle, static_cast<unsigned>(relay->subscribedHandles_.size()));
-            // A newly subscribed client immediately receives the shared cached
-            // frame, regardless of which client caused that frame to arrive.
-            if (!relay->latestData_.empty()) {
-                characteristic->setValue(relay->latestData_.data(), relay->latestData_.size());
-                const bool sent = characteristic->notify(
-                    relay->latestData_.data(), relay->latestData_.size(), handle);
-                APP_LOGF("[Relay] Cached BMS frame sent to new subscriber handle=%u result=%s\n",
-                              handle, sent ? "ok" : "failed");
-            }
         } else {
             const bool hadSubscribers = !relay->subscribedHandles_.empty();
             const auto subscriberIt = std::find(relay->subscribedHandles_.begin(),
@@ -189,6 +261,10 @@ class RelayCharacteristicCallbacks final : public NimBLECharacteristicCallbacks 
                         relay->subscriberNotifyFailureCounts_.begin() + subscriberIndex);
                 }
             }
+            relay->pendingInitialNotifyHandles_.erase(
+                std::remove(relay->pendingInitialNotifyHandles_.begin(),
+                            relay->pendingInitialNotifyHandles_.end(), handle),
+                relay->pendingInitialNotifyHandles_.end());
             if (hadSubscribers && relay->subscribedHandles_.empty() && relay->subscribeCallback_) {
                 relay->subscribeCallback_(false);
             }
@@ -199,6 +275,12 @@ class RelayCharacteristicCallbacks final : public NimBLECharacteristicCallbacks 
 };
 
 JkBmsNimbleRelay::JkBmsNimbleRelay() { instance_ = this; }
+bool JkBmsNimbleRelay::isNotifyMtuReady(uint16_t handle) const {
+    const auto handleIt = std::find(phoneHandles_.begin(), phoneHandles_.end(), handle);
+    if (handleIt == phoneHandles_.end()) return false;
+    const size_t index = static_cast<size_t>(handleIt - phoneHandles_.begin());
+    return index < phoneMtus_.size() && notifyMtuReady(phoneMtus_[index]);
+}
 
 void JkBmsNimbleRelay::init() {
     if (server_) return;
@@ -360,6 +442,7 @@ bool JkBmsNimbleRelay::begin() {
         }
     }
     phoneHandles_.clear();
+    phoneMtus_.clear();
     phoneAdvertisingInstances_.clear();
     pendingAdvertisingInstance_ = 0xFF;
     std::fill(advertisementStopPending_,
@@ -367,6 +450,10 @@ bool JkBmsNimbleRelay::begin() {
     subscribedHandles_.clear();
     subscriberNotifyFailureCounts_.clear();
     pendingDisconnectHandles_.clear();
+    pendingInitialNotifyHandles_.clear();
+    initialNotifyNotBeforeAt_ = 0;
+    jkHeaderPrefix_ = 0;
+    latestDataHasJkHeader_ = false;
     latestData_.clear();
     downstreamWriteSuccessCount_ = 0;
     downstreamWriteFailureCount_ = 0;
@@ -385,6 +472,27 @@ bool JkBmsNimbleRelay::begin() {
                   AppConfig::kBmsServiceUuid, AppConfig::kBmsCharacteristicUuid,
                   centralPaused_ ? "no" : "yes");
     return true;
+}
+
+void JkBmsNimbleRelay::sendPendingInitialNotifications() {
+    if (pendingInitialNotifyHandles_.empty() || latestData_.empty() || !characteristic_) return;
+    if (static_cast<int32_t>(millis() - initialNotifyNotBeforeAt_) < 0) return;
+    if (!latestDataHasJkHeader_) return;
+    std::vector<uint16_t> remaining;
+    for (const uint16_t handle : pendingInitialNotifyHandles_) {
+        if (std::find(subscribedHandles_.begin(), subscribedHandles_.end(), handle) == subscribedHandles_.end()) continue;
+        if (!isNotifyMtuReady(handle)) { remaining.push_back(handle); continue; }
+        const bool sent = characteristic_->notify(latestData_.data(), latestData_.size(), handle);
+        if (sent) {
+            ++downstreamNotifySuccessCount_;
+            lastDownstreamNotifyAt_ = millis();
+        } else {
+            ++downstreamNotifyFailureCount_;
+        }
+        APP_LOGF("[Relay] Initial BMS frame sent to handle=%u result=%s\\n",
+                 handle, sent ? "ok" : "failed");
+    }
+    pendingInitialNotifyHandles_.swap(remaining);
 }
 
 void JkBmsNimbleRelay::loop() {
@@ -475,6 +583,10 @@ void JkBmsNimbleRelay::setBmsConnectionAvailable(bool available) {
         advertisementStartPending_ = false;
         advertisementStartNotBeforeAt_ = 0;
         stopAdvertisements();
+        pendingInitialNotifyHandles_.clear();
+        initialNotifyNotBeforeAt_ = 0;
+    jkHeaderPrefix_ = 0;
+    latestDataHasJkHeader_ = false;
 
         const bool hadSubscribers = !subscribedHandles_.empty();
         subscribedHandles_.clear();
@@ -507,6 +619,7 @@ void JkBmsNimbleRelay::stop() {
     stopAdvertisements();
     running_ = false;
     phoneHandles_.clear();
+    phoneMtus_.clear();
     phoneAdvertisingInstances_.clear();
     pendingAdvertisingInstance_ = 0xFF;
     std::fill(advertisementStopPending_,
@@ -514,6 +627,10 @@ void JkBmsNimbleRelay::stop() {
     subscribedHandles_.clear();
     subscriberNotifyFailureCounts_.clear();
     pendingDisconnectHandles_.clear();
+    pendingInitialNotifyHandles_.clear();
+    initialNotifyNotBeforeAt_ = 0;
+    jkHeaderPrefix_ = 0;
+    latestDataHasJkHeader_ = false;
     latestData_.clear();
     advertisementStartPending_ = false;
     advertisementStartNotBeforeAt_ = 0;
@@ -523,8 +640,23 @@ void JkBmsNimbleRelay::stop() {
 void JkBmsNimbleRelay::notifyBmsData(const uint8_t* data, size_t length) {
     if (!characteristic_ || !data || length == 0 || length > AppConfig::kMaxRawFrame) return;
     latestData_.assign(data, data + length);
+    const size_t originalLength = latestData_.size();
+    removeAtSequences(latestData_);
+    if (latestData_.empty()) {
+        APP_LOGF("[Relay] suppressed payload containing only AT\\r\\n, original_len=%u\\n",
+                 static_cast<unsigned>(originalLength));
+        return;
+    }
+    const size_t cleanLength = latestData_.size();
+    const bool hasJkHeader = containsJkHeader(latestData_, jkHeaderPrefix_);
+    latestDataHasJkHeader_ = hasJkHeader;
     ++cachedBmsFrameCount_;
-    characteristic_->setValue(latestData_.data(), latestData_.size());
+    characteristic_->setValue(latestData_.data(), cleanLength);
+    if (cleanLength != originalLength) {
+        APP_LOGF("[Relay] removed %u AT\\r\\n sequence bytes, clean_len=%u\\n",
+                 static_cast<unsigned>(originalLength - cleanLength),
+                 static_cast<unsigned>(cleanLength));
+    }
 
     if (subscribedHandles_.empty()) {
         APP_LOGLN("[Relay] BMS response cached for GATT read; no phone subscriber");
@@ -542,11 +674,18 @@ void JkBmsNimbleRelay::notifyBmsData(const uint8_t* data, size_t length) {
     uint8_t disconnectCount = 0;
     for (size_t index = 0; index < subscribedHandles_.size(); ++index) {
         const uint16_t handle = subscribedHandles_[index];
-        const bool sent = characteristic_->notify(data, length, handle);
+        if (!isNotifyMtuReady(handle)) continue;
+        const auto pendingIt = std::find(pendingInitialNotifyHandles_.begin(),
+                                         pendingInitialNotifyHandles_.end(), handle);
+        if (pendingIt != pendingInitialNotifyHandles_.end() && !hasJkHeader) continue;
+        const bool sent = characteristic_->notify(latestData_.data(), cleanLength, handle);
         if (sent) {
             ++downstreamNotifySuccessCount_;
             lastDownstreamNotifyAt_ = millis();
             subscriberNotifyFailureCounts_[index] = 0;
+            if (pendingIt != pendingInitialNotifyHandles_.end()) {
+                pendingInitialNotifyHandles_.erase(pendingIt);
+            }
         } else {
             ++downstreamNotifyFailureCount_;
             uint8_t& failures = subscriberNotifyFailureCounts_[index];
@@ -557,7 +696,7 @@ void JkBmsNimbleRelay::notifyBmsData(const uint8_t* data, size_t length) {
             }
         }
         APP_LOGF("[Relay] BMS Notify routed to handle=%u len=%u result=%s\n",
-                      handle, static_cast<unsigned>(length), sent ? "ok" : "failed");
+                      handle, static_cast<unsigned>(cleanLength), sent ? "ok" : "failed");
     }
 
     if (disconnectCount == 0) return;

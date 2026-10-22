@@ -47,45 +47,78 @@ const char kIndexHtml[] PROGMEM = R"HTML(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ESP32-S3 BMS Relay</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:760px;margin:20px auto;padding:0 14px;color:#222}
-button{margin:6px 4px 6px 0;padding:7px 14px}
-input{padding:7px;width:220px;max-width:70%}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-top:16px}
-.card{border:1px solid #ccc;border-radius:8px;padding:12px;background:#fafafa}
-.card h3{margin:0 0 8px}.ok{color:#16803c}.off{color:#777}.error{color:#b42318}
-.signal-card{min-width:0}.signal-card.locked{opacity:.58}.signal-card h3{display:flex;justify-content:space-between;align-items:center}.signal-state{margin:4px 0}.signal-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.signal-controls input{box-sizing:border-box;width:180px;max-width:100%}
-button:disabled,input:disabled{cursor:not-allowed}
+:root{color-scheme:light;--ink:#19342f;--muted:#718783;--mint:#dff3ec;--mint-strong:#73cbb0;--blue:#72b8d8;--danger:#c96565;--line:#dcece6;--shadow:0 9px 22px rgba(69,125,111,.10)}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:linear-gradient(145deg,#effaf6 0%,#f7fbff 58%,#fffaf2 100%);font-family:ui-rounded,"Avenir Next",system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);letter-spacing:.01em}
+#status-page{width:min(920px,calc(100% - 24px));margin:0 auto;padding:20px 0 28px}
+.hero{position:relative;overflow:hidden;padding:20px 24px;margin-bottom:12px;border:1px solid rgba(255,255,255,.85);border-radius:22px;background:linear-gradient(135deg,rgba(223,243,236,.94),rgba(244,250,255,.94));box-shadow:var(--shadow)}
+.hero:after{content:"";position:absolute;width:190px;height:190px;right:-60px;top:-80px;border-radius:50%;background:rgba(114,184,216,.16)}
+.eyebrow{position:relative;z-index:1;margin:0 0 8px;color:#4e9f8a;font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase}
+.hero h1{position:relative;z-index:1;margin:0;font-size:clamp(28px,5vw,42px);letter-spacing:-.04em}
+.hero p{position:relative;z-index:1;margin:9px 0 0;color:var(--muted);font-size:14px}
+.hero-meta{position:relative;z-index:1;display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.72);color:#48756d;font-size:13px;font-weight:700}
+.toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:end;gap:12px;margin:18px 0}
+.field{display:flex;flex-direction:column;gap:7px;color:var(--muted);font-size:12px;font-weight:800}
+input{width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:13px;background:rgba(255,255,255,.82);color:var(--ink);font:inherit;outline:none;transition:border-color .2s,box-shadow .2s,background .2s}
+input:focus{border-color:var(--mint-strong);background:#fff;box-shadow:0 0 0 4px rgba(115,203,176,.16)}
+button{border:0;border-radius:13px;padding:12px 18px;background:#62b79d;color:white;font:inherit;font-weight:800;cursor:pointer;box-shadow:0 5px 12px rgba(70,153,127,.18);transition:transform .18s,filter .18s,box-shadow .18s}
+button:hover{filter:brightness(1.04);transform:translateY(-1px);box-shadow:0 8px 16px rgba(70,153,127,.22)}
+button.secondary{background:#edf5f3;color:#47766d;box-shadow:none;border:1px solid #d5e9e2}
+button:disabled,input:disabled{cursor:not-allowed;opacity:.52;box-shadow:none}
+.stats-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px}
+.stat{padding:12px 14px;border:1px solid var(--line);border-radius:15px;background:rgba(255,255,255,.7);box-shadow:0 6px 15px rgba(69,125,111,.06)}
+.stat-label{display:block;color:var(--muted);font-size:12px;font-weight:800}.stat-value{display:block;margin-top:5px;font-size:20px;font-weight:850}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px}
+.card{margin-top:10px;padding:15px 17px;border:1px solid rgba(220,236,230,.95);border-radius:17px;background:rgba(255,255,255,.78);box-shadow:var(--shadow)}
+.card h2,.card h3{margin:0 0 9px;letter-spacing:-.02em}.card h3{font-size:18px}.card p{line-height:1.65}
+.card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}.card-note{margin:0;color:var(--muted);font-size:13px}
+.status-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}.status-item{padding:12px 14px;border-radius:15px;background:#f5fbf8}.status-item span{display:block;color:var(--muted);font-size:12px}.status-item strong{display:block;margin-top:4px;word-break:break-word}
+.status-detail{margin:15px 0 0;padding:12px 14px;border-radius:14px;background:#f3f8ff;color:#58717d;font-size:13px;line-height:1.55}
+.signal-card{min-width:0;margin-top:0;padding:17px;background:linear-gradient(145deg,#fbfffd,#f4fbff)}.signal-card.locked{opacity:.64}.signal-card h3{display:flex;justify-content:space-between;align-items:center}.signal-state{margin:7px 0;color:var(--muted);font-size:13px}.signal-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:13px}.signal-controls label{width:100%;color:var(--muted);font-size:12px;font-weight:800}.signal-controls input{margin-top:6px;padding:10px 12px}
+#bms-state{display:inline-flex;padding:5px 10px;border-radius:999px;background:#eef6f3;font-size:13px}.ok{color:#308d73}.wait{color:#c58a3a}.off{color:var(--muted)}.error{color:var(--danger)}
+#bms-error{margin-top:10px;font-size:13px}.message{min-height:20px;margin-top:12px;font-size:13px}
+.file-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px}.file-row input{flex:1;min-width:220px}
+.footer-note{margin:22px 4px 0;color:#91a7a1;font-size:12px;text-align:center}
+@media(max-width:640px){#status-page{width:min(100% - 16px,920px);padding-top:12px}.hero{padding:18px 16px;border-radius:18px}.toolbar{grid-template-columns:1fr 1fr}.toolbar .field{grid-column:1/-1}.toolbar button{width:100%}.stats-grid,.status-list{grid-template-columns:1fr}.card{padding:14px;border-radius:16px}}
 </style>
 <div id="status-page">
-<h2>BMS Relay</h2>
-<p>AP: CAR &nbsp; IP: 192.168.4.1</p>
-<label>BMS MAC <input id="mac" type="text" autocomplete="off" spellcheck="false" placeholder="AA:BB:CC:DD:EE:FF 或 AABBCCDDEEFF"></label>
-<button onclick="connectBms()">连接</button><button onclick="disconnectBms()">断开</button>
-<p>手机连接：<strong id="phone-count">0</strong> / <span id="phone-max">-</span></p>
-<p>核心温度：<strong id="core-temperature">读取中...</strong></p>
-<div class="card" id="bms-card">
-  <h3>BMS 连接状态</h3>
-  <div>目标 MAC：<span id="bms-mac">-</span></div>
-  <div>当前状态：<strong id="bms-state">读取中...</strong></div>
-  <div id="bms-detail">正在读取 BMS 状态...</div>
-  <div id="bms-error" class="error"></div>
-</div>
-<div class="card" id="signal-config">
-  <h3>虚拟广播</h3>
-  <p class="off">固定提供两个广播，均使用 FFE0/FFE1 服务。可修改未连接广播的名称；每个名称最多12字节。</p>
-  <div id="signal-name-list" class="grid"></div>
-  <button id="save-signals" type="button" onclick="saveSignals()">保存广播名称</button>
-  <div id="signal-lock-status" class="off"></div>
-  <div id="signal-config-status" class="off"></div>
-</div>
-<div class="card" id="ota-card">
-  <h3>固件 OTA 更新</h3>
-  <form id="ota-form" enctype="multipart/form-data">
-    <input id="ota-file" type="file" name="firmware" accept=".bin,application/octet-stream" required>
-    <button type="submit">上传并重启</button>
-  </form>
-  <div id="ota-status" class="off">请选择新的 .bin 固件文件</div>
-</div>
+  <section class="hero">
+    <p class="eyebrow">ESP32 · BLE BRIDGE</p>
+    <h1>BMS Relay</h1>
+    <p>轻盈、安静地连接真实 BMS 与你的客户端。</p>
+    <div class="hero-meta"><span class="badge">☁ AP · CAR</span><span class="badge">⌁ 192.168.4.1</span></div>
+  </section>
+  <div class="toolbar">
+    <label class="field">真实 BMS MAC
+      <input id="mac" type="text" autocomplete="off" spellcheck="false" placeholder="AA:BB:CC:DD:EE:FF 或 AABBCCDDEEFF">
+    </label>
+    <button onclick="connectBms()">连接 BMS</button><button class="secondary" onclick="disconnectBms()">断开</button>
+  </div>
+  <div class="stats-grid">
+    <div class="stat"><span class="stat-label">手机连接</span><strong class="stat-value"><span id="phone-count">0</span> <span style="font-size:13px;color:var(--muted)">/ <span id="phone-max">-</span></span></strong></div>
+    <div class="stat"><span class="stat-label">ESP32 核心温度</span><strong class="stat-value" id="core-temperature">读取中...</strong></div>
+  </div>
+  <section class="card" id="bms-card">
+    <div class="card-head"><div><h3>BMS 连接状态</h3><p class="card-note">实时查看连接与中继准备状态</p></div><strong id="bms-state">读取中...</strong></div>
+    <div class="status-list"><div class="status-item"><span>目标 MAC</span><strong id="bms-mac">-</strong></div><div class="status-item"><span>当前状态</span><strong id="bms-detail">正在读取 BMS 状态...</strong></div></div>
+    <div id="bms-error" class="error"></div>
+  </section>
+  <section class="card" id="signal-config">
+    <div class="card-head"><div><h3>虚拟广播</h3><p class="card-note">两个柔和的入口，共享 FFE0/FFE1 服务；连接中的名称会自动锁定。</p></div><span class="badge">BLE</span></div>
+    <div id="signal-name-list" class="grid"></div>
+    <button id="save-signals" type="button" onclick="saveSignals()">保存广播名称</button>
+    <div id="signal-lock-status" class="message off"></div><div id="signal-config-status" class="message off"></div>
+  </section>
+  <section class="card" id="frame-export-card">
+    <div class="card-head"><div><h3>数据帧导出</h3><p class="card-note">导出客户端在采集窗口内发送的原始数据帧，便于 Wireshark 或脚本分析。</p></div><span class="badge">HEX</span></div>
+    <button id="export-frames" class="secondary" type="button" onclick="exportFrames()" disabled>暂无数据帧</button>
+  </section>
+  <section class="card" id="ota-card">
+    <div class="card-head"><div><h3>固件更新</h3><p class="card-note">上传新的 .bin 固件后设备会自动重启。</p></div><span class="badge">OTA</span></div>
+    <form id="ota-form" class="file-row" enctype="multipart/form-data"><input id="ota-file" type="file" name="firmware" accept=".bin,application/octet-stream" required><button type="submit">上传并重启</button></form>
+    <div id="ota-status" class="message off">请选择新的 .bin 文件</div>
+  </section>
 </div>
 <script>
 function setBmsStatus(data){
@@ -95,15 +128,23 @@ function setBmsStatus(data){
   const mac=data.mac||'未填写';
   const labels=['未连接','正在扫描目标 BMS','正在建立 BMS 连接','BMS 已连接','BMS 已断开，等待自动重连'];
   const connected=!!data.connected;
+  const upstreamRequested=!!data.upstream_subscription_requested;
+  const upstreamPending=!!data.upstream_subscription_pending;
+  const upstreamSubscribed=!!data.upstream_subscribed;
   let text=connected?'BMS 已连接':(labels[data.state]||'状态未知');
   let detailText='';
   if(data.state===0) detailText='请填写 BMS MAC 地址后点击“连接”';
   else if(data.state===1) detailText='正在查找目标设备：'+mac;
   else if(data.state===2) detailText='已找到目标设备，正在连接并检查 FFE0/FFE1';
-  else if(data.state===3) detailText='FFE0/FFE1 已找到，等待虚拟客户端订阅或写入';
+  else if(data.state===3) {
+    if(upstreamSubscribed) detailText='FFE0/FFE1 已找到，上游 Notify 已订阅';
+    else if(upstreamPending && upstreamRequested) detailText='客户端已订阅，正在等待上游 Notify 完成';
+    else if(upstreamRequested) detailText='客户端已请求订阅，正在建立上游 Notify';
+    else detailText='FFE0/FFE1 已找到，等待虚拟客户端订阅';
+  }
   else if(data.state===4) detailText='设备暂时断开，系统将在几秒后自动重试';
   state.textContent=text;
-  state.className=connected?'ok':(data.error?'error':'off');
+  state.className=upstreamSubscribed?'ok':(connected?'wait':(data.error?'error':'off'));
   detail.textContent=detailText;
   error.textContent=data.error?('错误：'+data.error):'';
   document.getElementById('bms-mac').textContent=mac;
@@ -193,6 +234,10 @@ async function refresh(){
     // every two seconds, so an unconditional assignment loses manual changes.
     if(!macInputDirty && document.activeElement!==macInput) macInput.value=data.mac||'';
     phoneConnections=Number(data.phone_connections)||0;
+    const replayFrameCount=Number(data.replay_frame_count)||0;
+    const exportButton=document.getElementById('export-frames');
+    exportButton.disabled=replayFrameCount===0;
+    exportButton.textContent=replayFrameCount?`导出 HEX 数据帧（${replayFrameCount}）`:'暂无数据帧';
     signalConnectionStates=(data.signals.items||[]).map(signal=>!!signal.connected);
     document.getElementById('phone-count').textContent=phoneConnections;
     document.getElementById('phone-max').textContent=data.signals.signal_count||0;
@@ -225,6 +270,7 @@ async function disconnectBms(){
   await fetch('/disconnect',{method:'POST'});
   refresh();
 }
+function exportFrames(){window.location.href='/export/frames';}
 const otaForm=document.getElementById('ota-form');
 const otaFile=document.getElementById('ota-file');
 const otaStatus=document.getElementById('ota-status');
@@ -271,8 +317,9 @@ bool WebManager::startSoftAp() {
         return false;
     }
 
-    // esp_wifi_set_max_tx_power() uses units of 0.25 dBm: 7 dBm = 28.
-    const esp_err_t txPowerResult = esp_wifi_set_max_tx_power(28);
+    // esp_wifi_set_max_tx_power() uses units of 0.25 dBm: 19.5 dBm = 78.
+    // This is the ESP32-S3 Wi-Fi transmit-power ceiling used by the driver.
+    const esp_err_t txPowerResult = esp_wifi_set_max_tx_power(78);
     const esp_err_t psResult = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     wifi_config_t apConfig{};
     esp_err_t beaconResult = esp_wifi_get_config(WIFI_IF_AP, &apConfig);
@@ -281,7 +328,7 @@ bool WebManager::startSoftAp() {
         apConfig.ap.beacon_interval = 1000;
         beaconResult = esp_wifi_set_config(WIFI_IF_AP, &apConfig);
     }
-    APP_LOGF("[WiFi] SoftAP %s, IP=%s, TX power=7 dBm, PS=MIN_MODEM, beacon=1000TU (~1.024s)\n",
+    APP_LOGF("[WiFi] SoftAP %s, IP=%s, TX power=19.5 dBm, PS=MIN_MODEM, beacon=1000TU (~1.024s)\n",
                   AppConfig::kApSsid, WiFi.softAPIP().toString().c_str());
     if (txPowerResult != ESP_OK) {
         APP_LOGF("[WiFi] TX power setup failed: %d\n",
@@ -318,14 +365,14 @@ void WebManager::updatePowerSaving() {
     if (wifiSleeping_) return;
     if (bmsConnectedSince_ == 0) bmsConnectedSince_ = now;
 
-    constexpr unsigned long kStableConnectionBeforeWifiOff = 10UL * 60UL * 1000UL;
+    constexpr unsigned long kStableConnectionBeforeWifiOff = 3UL * 60UL * 1000UL;
     const bool stable = now - bmsConnectedSince_ >= kStableConnectionBeforeWifiOff;
     const bool apInUse = WiFi.softAPgetStationNum() > 0;
     if (stable && !apInUse) {
         WiFi.mode(WIFI_OFF);
         wifiSleeping_ = true;
         nextWifiRestoreAt_ = 0;
-        APP_LOGLN("[WiFi] disabled after 10 minutes of stable BMS connection");
+        APP_LOGLN("[WiFi] disabled after 3 minutes of stable BMS connection");
     }
 }
 
@@ -334,6 +381,7 @@ void WebManager::begin() {
     startSoftAp();
     server_.on("/", HTTP_GET, [this]() { root(); });
     server_.on("/status", HTTP_GET, [this]() { status(); });
+    server_.on("/export/frames", HTTP_GET, [this]() { exportFrames(); });
     server_.on("/connect", HTTP_POST, [this]() { connect(); });
     server_.on("/disconnect", HTTP_POST, [this]() { disconnect(); });
     server_.on("/signals", HTTP_POST, [this]() { updateSignals(); });
@@ -391,6 +439,10 @@ void WebManager::root() {
     server_.send_P(200, "text/html; charset=UTF-8", kIndexHtml);
 }
 
+void WebManager::exportFrames() {
+    central_.exportReplayFrames(server_);
+}
+
 void WebManager::status() {
     // Keep the response document out of the WebServer task stack. The status
     // endpoint is polled frequently, so also stream JSON directly instead of
@@ -425,6 +477,7 @@ void WebManager::status() {
     document["upstream_subscription_successes"] = central_.upstreamSubscriptionSuccessCount();
     document["upstream_subscription_failures"] = central_.upstreamSubscriptionFailureCount();
     document["upstream_unsubscribe_failures"] = central_.upstreamUnsubscribeFailureCount();
+    document["replay_frame_count"] = central_.replayFrameCount();
     document["free_heap"] = ESP.getFreeHeap();
     document["min_free_heap"] = ESP.getMinFreeHeap();
     document["error"] = central_.lastError();

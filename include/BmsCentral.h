@@ -3,6 +3,9 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <functional>
+#include <vector>
+
+class WebServer;
 
 #include "AppConfig.h"
 
@@ -32,6 +35,8 @@ public:
     uint32_t upstreamSubscriptionSuccessCount() const { return upstreamSubscriptionSuccessCount_; }
     uint32_t upstreamSubscriptionFailureCount() const { return upstreamSubscriptionFailureCount_; }
     uint32_t upstreamUnsubscribeFailureCount() const { return upstreamUnsubscribeFailureCount_; }
+    uint32_t replayFrameCount() const { return static_cast<uint32_t>(replayQueries_.size()); }
+    void exportReplayFrames(WebServer& server) const;
     State state() const { return state_; }
     const String& targetMac() const { return targetMac_; }
     const String& lastError() const { return lastError_; }
@@ -60,6 +65,17 @@ private:
     uint32_t nextScanAt_{0};
     uint32_t scanStopRequestedAt_{0};
     uint32_t upstreamSubscriptionRetryAt_{0};
+    uint32_t upstreamSubscriptionNotBeforeAt_{0};
+    uint32_t upstreamSubscribedAt_{0};
+    uint32_t lastUpstreamWriteAt_{0};
+    uint32_t replayCaptureStartedAt_{0};
+    bool replayCaptureActive_{false};
+    struct ReplayQuery {
+        std::vector<uint8_t> data;
+    };
+    std::vector<ReplayQuery> replayQueries_;
+    bool replayAfterSubscription_{false};
+    bool replayingQueries_{false};
     uint32_t lastUpstreamNotifyAt_{0};
     uint16_t lastUpstreamNotifyLength_{0};
     uint32_t upstreamNotifyCount_{0};
@@ -72,6 +88,7 @@ private:
     bool matchesTargetAddress(const NimBLEAddress& address) const;
     void startScan();
     bool applyUpstreamSubscription();
+    void replayRecentQueries();
     friend class CentralClientCallbacks;
     friend class CentralScanCallbacks;
 };

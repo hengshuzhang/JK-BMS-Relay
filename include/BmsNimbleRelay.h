@@ -36,6 +36,7 @@ public:
     void loop();
     void stop();
     void setBmsConnectionAvailable(bool available);
+    void sendPendingInitialNotifications();
     bool bmsConnectionAvailable() const { return !centralPaused_; }
     bool advertisementStartPending() const { return advertisementStartPending_; }
     void notifyBmsData(const uint8_t* data, size_t length);
@@ -73,11 +74,16 @@ private:
     uint8_t signalCount_{AppConfig::kDefaultVirtualSignalCount};
     std::vector<uint8_t> latestData_;
     std::vector<uint16_t> phoneHandles_;
+    std::vector<uint16_t> phoneMtus_;
     std::vector<uint16_t> subscribedHandles_;
     std::vector<uint8_t> subscriberNotifyFailureCounts_;
     std::vector<uint16_t> pendingDisconnectHandles_;
     std::vector<uint8_t> phoneAdvertisingInstances_;
+    std::vector<uint16_t> pendingInitialNotifyHandles_;
+    uint32_t initialNotifyNotBeforeAt_{0};
+    uint8_t jkHeaderPrefix_{0};
     bool advertisementStopPending_[AppConfig::kMaxVirtualSignals] = {};
+    bool latestDataHasJkHeader_{false};
     uint8_t pendingAdvertisingInstance_{0xFF};
     uint32_t lastAdvertisementMaintenanceAt_{0};
     uint32_t advertisementStartNotBeforeAt_{0};
@@ -96,6 +102,7 @@ private:
         return std::find(phoneAdvertisingInstances_.begin(), phoneAdvertisingInstances_.end(), instance) !=
                phoneAdvertisingInstances_.end();
     }
+    bool isNotifyMtuReady(uint16_t handle) const;
 
     void queueDisconnect(uint16_t handle) {
         if (std::find(pendingDisconnectHandles_.begin(), pendingDisconnectHandles_.end(), handle) ==

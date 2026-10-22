@@ -7,6 +7,8 @@
 #include "AppConfig.h"
 #include <NimBLEUtils.h>
 #include <ctype.h>
+#include <string.h>
+#include <WebServer.h>
 
 namespace {
 BmsCentral* currentCentral = nullptr;
@@ -181,6 +183,11 @@ CentralScanCallbacks scanCallbacks;
 
 bool BmsCentral::begin(const String& savedMac) {
     currentCentral = this;
+    replayAfterSubscription_ = false;
+    replayingQueries_ = false;
+    replayQueries_.clear();
+    replayCaptureActive_ = false;
+    replayCaptureStartedAt_ = 0;
     connected_ = false;
     connectRequested_ = false;
     connectAttemptPending_ = false;
@@ -265,7 +272,11 @@ bool BmsCentral::connectTo(const String& mac) {
         if (client_->isConnected()) {
             connected_ = false;
             characteristic_ = nullptr;
-            writeWithResponse_ = false;
+            if (upstreamSubscribed_) {
+        upstreamSubscribed_ = false;
+        upstreamSubscribedAt_ = 0;
+    }
+    writeWithResponse_ = false;
             disconnectPending_ = true;
             state_ = State::Disconnected;
             client_->disconnect();
@@ -289,6 +300,10 @@ bool BmsCentral::connectTo(const String& mac) {
     connectCancelPending_ = false;
     disconnectPending_ = false;
     characteristic_ = nullptr;
+    if (upstreamSubscribed_) {
+        upstreamSubscribed_ = false;
+        upstreamSubscribedAt_ = 0;
+    }
     writeWithResponse_ = false;
     state_ = State::Scanning;
     nextScanAt_ = 0;
@@ -296,11 +311,21 @@ bool BmsCentral::connectTo(const String& mac) {
 }
 
 void BmsCentral::requestUpstreamSubscription(bool enabled) {
+    const uint32_t now = millis();
+    if (enabled && !upstreamSubscriptionRequested_) {
+        replayQueries_.clear();
+        replayCaptureStartedAt_ = now;
+        replayCaptureActive_ = true;
+        APP_LOGF("[Central] started %lu ms client-frame capture window\\n",
+                 static_cast<unsigned long>(AppConfig::kReplayQueryCaptureWindowMs));
+    } else if (!enabled) {
+        replayCaptureActive_ = false;
+        replayCaptureStartedAt_ = 0;
+    }
     upstreamSubscriptionRequested_ = enabled;
     upstreamSubscriptionChangePending_ = true;
-    // A fresh downstream CCCD event must be applied immediately, rather than
-    // inheriting a retry delay that belongs to an earlier operation.
     upstreamSubscriptionRetryPending_ = false;
+    upstreamSubscriptionNotBeforeAt_ = enabled ? now + AppConfig::kDownstreamInitialNotifyDelayMs : now;
 }
 
 bool BmsCentral::applyUpstreamSubscription() {
@@ -313,6 +338,9 @@ bool BmsCentral::applyUpstreamSubscription() {
         return true;
     }
     upstreamSubscriptionRetryPending_ = false;
+    if (upstreamSubscriptionRequested_ && static_cast<int32_t>(now - upstreamSubscriptionNotBeforeAt_) < 0) {
+        return true;
+    }
 
     if (upstreamSubscriptionRequested_) {
         if (upstreamSubscribed_) {
@@ -342,7 +370,12 @@ bool BmsCentral::applyUpstreamSubscription() {
         }
         ++upstreamSubscriptionSuccessCount_;
         upstreamSubscribed_ = true;
+        upstreamSubscribedAt_ = now;
         upstreamSubscriptionChangePending_ = false;
+        if (replayAfterSubscription_) {
+            replayAfterSubscription_ = false;
+            replayRecentQueries();
+        }
         lastError_ = "";
         APP_LOGF("[Central] upstream %s subscribed by downstream client request\n",
                       notifications ? "Notify" : "Indicate");
@@ -450,9 +483,9 @@ bool BmsCentral::connectDiscoveredDevice() {
     }
 
     connectAttemptPending_ = true;
-    // Some JK-BMS firmware does not complete the optional MTU exchange.
-    // Keep the default ATT MTU and proceed directly to service discovery.
-    if (!client_->connect(peerAddress, true, false, false)) {
+    // Request an ATT MTU exchange. The local preferred MTU is configured to
+    // 517; the final value is negotiated with the BMS and may be lower.
+    if (!client_->connect(peerAddress, true, false, true)) {
         const int error = client_->getLastError();
         const char* errorText = NimBLEUtils::returnCodeToString(error);
         const bool linkEstablished = client_->isConnected();
@@ -479,7 +512,11 @@ bool BmsCentral::connectDiscoveredDevice() {
         connected_ = false;
         connectRequested_ = false;
         characteristic_ = nullptr;
-        writeWithResponse_ = false;
+        if (upstreamSubscribed_) {
+        upstreamSubscribed_ = false;
+        upstreamSubscribedAt_ = 0;
+    }
+    writeWithResponse_ = false;
         setCentralError(lastError_, String("connect failed (") + error + "): " + errorText);
         APP_LOGF("[Central] BMS connect failed, lastError=%d (%s)\n", error, errorText);
         return false;
@@ -517,7 +554,11 @@ bool BmsCentral::connectDiscoveredDevice() {
                       serviceError, errorText, stillConnected ? "yes" : "no");
         connected_ = false;
         characteristic_ = nullptr;
-        writeWithResponse_ = false;
+        if (upstreamSubscribed_) {
+        upstreamSubscribed_ = false;
+        upstreamSubscribedAt_ = 0;
+    }
+    writeWithResponse_ = false;
         connectAttemptPending_ = false;
         connectCancelPending_ = false;
         connectRequested_ = false;
@@ -567,6 +608,10 @@ bool BmsCentral::connectDiscoveredDevice() {
 }
 
 void BmsCentral::disconnect() {
+    replayAfterSubscription_ = false;
+    replayCaptureActive_ = false;
+    replayCaptureStartedAt_ = 0;
+    lastUpstreamWriteAt_ = 0;
     wantConnection_ = false;
     connectRequested_ = false;
     peerAddress_ = NimBLEAddress();
@@ -602,13 +647,63 @@ void BmsCentral::disconnect() {
     connectCancelPending_ = false;
     disconnectPending_ = false;
     characteristic_ = nullptr;
+    if (upstreamSubscribed_) {
+        upstreamSubscribed_ = false;
+        upstreamSubscribedAt_ = 0;
+    }
     writeWithResponse_ = false;
     state_ = State::Idle;
 }
 
 bool BmsCentral::write(const uint8_t* data, size_t length) {
     if (!connected_ || !characteristic_ || !data || length == 0) return false;
-    return characteristic_->writeValue(data, length, writeWithResponse_);
+    if (!characteristic_->writeValue(data, length, writeWithResponse_)) return false;
+    if (!replayingQueries_ && replayCaptureActive_) {
+        if (millis() - replayCaptureStartedAt_ < AppConfig::kReplayQueryCaptureWindowMs) {
+            ReplayQuery query;
+            query.data.assign(data, data + length);
+            replayQueries_.push_back(query);
+        } else {
+            replayCaptureActive_ = false;
+        }
+    }
+    lastUpstreamWriteAt_ = millis();
+    return true;
+}
+
+void BmsCentral::exportReplayFrames(WebServer& server) const {
+    server.sendHeader("Content-Disposition", "attachment; filename=\"bms_replay_frames.hex\"");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/plain; charset=UTF-8", "");
+    static const char hex[] = "0123456789ABCDEF";
+    for (const auto& query : replayQueries_) {
+        String line;
+        line.reserve(query.data.size() * 3 + 2);
+        for (size_t i = 0; i < query.data.size(); ++i) {
+            if (i) line += ' ';
+            line += hex[(query.data[i] >> 4) & 0x0F];
+            line += hex[query.data[i] & 0x0F];
+        }
+        line += "\\r\\n";
+        server.sendContent(line);
+    }
+}
+
+void BmsCentral::replayRecentQueries() {
+    if (!client_ || !client_->isConnected() || !characteristic_ || replayQueries_.empty()) return;
+    replayingQueries_ = true;
+    // Replay every client frame in its original order. This intentionally
+    // includes the complete handshake/query sequence, not just the newest
+    // command; the target BMS requires that sequence before it responds.
+    for (const ReplayQuery& query : replayQueries_) {
+        if (query.data.empty()) continue;
+        const bool sent = characteristic_->writeValue(
+            query.data.data(), query.data.size(), writeWithResponse_);
+        APP_LOGF("[Central] replayed client frame len=%u result=%s\\n",
+                 static_cast<unsigned>(query.data.size()), sent ? "ok" : "failed");
+        if (sent) lastUpstreamWriteAt_ = millis();
+    }
+    replayingQueries_ = false;
 }
 
 void BmsCentral::loop() {
@@ -640,12 +735,39 @@ void BmsCentral::loop() {
         static_cast<int32_t>(millis() - nextScanAt_) >= 0) {
         startScan();
     }
+    const uint32_t now = millis();
+    if (connected_ && upstreamSubscriptionRequested_ && upstreamSubscribed_ &&
+        !upstreamSubscriptionChangePending_ && characteristic_) {
+        const uint32_t notifyReference = upstreamSubscribedAt_ > lastUpstreamNotifyAt_
+            ? upstreamSubscribedAt_ : lastUpstreamNotifyAt_;
+        const bool notifyStale = notifyReference != 0 &&
+            now - notifyReference >= AppConfig::kUpstreamNotifyWatchdogMs;
+        const bool responseStale = lastUpstreamWriteAt_ != 0 &&
+            now - lastUpstreamWriteAt_ >= AppConfig::kUpstreamResponseWatchdogMs;
+        if (notifyStale || responseStale) {
+            if (characteristic_->unsubscribe(true)) {
+                upstreamSubscribed_ = false;
+                upstreamSubscriptionChangePending_ = true;
+                upstreamSubscriptionRetryPending_ = false;
+                upstreamSubscriptionNotBeforeAt_ = now + AppConfig::kDownstreamInitialNotifyDelayMs;
+                replayAfterSubscription_ = true;
+                lastUpstreamWriteAt_ = 0;
+                APP_LOGF("[Central] upstream Notify watchdog recovery (%s)\\n",
+                         responseStale ? "response_timeout" : "notify_stale");
+            } else {
+                upstreamSubscriptionRetryPending_ = true;
+                upstreamSubscriptionRetryAt_ = now + AppConfig::kUpstreamSubscriptionRetryMs;
+                setCentralError(lastError_, "BMS upstream watchdog unsubscribe failed");
+            }
+        }
+    }
     applyUpstreamSubscription();
 }
 
 void BmsCentral::onNotify(const uint8_t* data, size_t length) {
     if (!data || length == 0) return;
     lastUpstreamNotifyAt_ = millis();
+    lastUpstreamWriteAt_ = 0;
     lastUpstreamNotifyLength_ = static_cast<uint16_t>(length);
     ++upstreamNotifyCount_;
     if (notifyCallback_) notifyCallback_(data, length);
